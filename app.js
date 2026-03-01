@@ -12,6 +12,20 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Network from 'expo-network';
 import { supabase } from './lib/supabase';
 import { dbHelpers, OFFLINE_QUEUE_KEY } from './lib/db';
+import AuthScreen from './components/screens/auth-screen';
+import AICoachBubble from './components/AICoachBubble';
+import AICoachScreen from './screens/AICoachScreen';
+import TodayScreen from './screens/TodayScreen';
+import SignalScreen from './screens/SignalScreen';
+import ActiveTradeScreen from './screens/ActiveTradeScreen';
+import ChartScreen from './screens/ChartScreen';
+import ProfileScreen from './screens/ProfileScreen';
+import MarketHoursScreen from './screens/MarketHoursScreen';
+import MarketStatusBar from './components/MarketStatusBar';
+import { useMarketScanner } from './hooks/useMarketScanner';
+import { useActiveTrade } from './hooks/useActiveTrade';
+import { useGoalPacing } from './hooks/useGoalPacing';
+import { notificationEngine } from './engine/notificationEngine';
 
 
 const { width } = Dimensions.get('window');
@@ -425,7 +439,7 @@ const GUIDE_STEPS = [
 ];
 
 export default function App() {
-  const [screen, setScreen]         = useState('home');
+  const [screen, setScreen]         = useState('today');
   const [guidePhase, setGuidePhase] = useState(0);
   const [guideStep, setGuideStep]   = useState(0);
   const [answers, setAnswers]       = useState({});
@@ -442,17 +456,17 @@ export default function App() {
   const [now, setNow] = useState(new Date());
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [accountStartDate, setAccountStartDate] = useState(new Date().toISOString());
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
-  const [authMode, setAuthMode] = useState('login');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPassword, setAuthPassword] = useState('');
-  const [authLoading, setAuthLoading] = useState(false);
-  const [authError, setAuthError] = useState('');
   const [isOnline, setIsOnline] = useState(true);
   const [syncStatus, setSyncStatus] = useState('synced');
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(40)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
+  const { scanStatus, activeSignal, setActiveSignal, manualScan } = useMarketScanner(user?.id);
+  const { activeTrade, liveTrade, setActiveTrade, clearActiveTrade } = useActiveTrade();
+  const pacing = useGoalPacing(totalProfit, accountStartDate);
 
   const currentPhaseData = GUIDE_STEPS[guidePhase];
   const currentStep      = currentPhaseData?.steps[guideStep];
@@ -462,9 +476,10 @@ export default function App() {
   useEffect(() => { registerNotif(); scheduleAlarms(); pulseLoop(); }, []);
   useEffect(() => { if (screen === 'guide') animStep(); }, [guidePhase, guideStep, screen]);
   useEffect(() => {
+    if (!session || !user || screen !== 'today') return undefined;
     const timer = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [session, user, screen]);
 
   useEffect(() => {
     let alive = true;
@@ -514,6 +529,7 @@ export default function App() {
 
   useEffect(() => {
     let mounted = true;
+    let interval = null;
 
     const checkConnection = async () => {
       try {
@@ -530,12 +546,14 @@ export default function App() {
     };
 
     checkConnection();
-    const interval = setInterval(checkConnection, 5000);
+    if (user?.id) {
+      interval = setInterval(checkConnection, 5000);
+    }
     return () => {
       mounted = false;
-      clearInterval(interval);
+      if (interval) clearInterval(interval);
     };
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!isOnline || !user?.id) return;
@@ -607,7 +625,7 @@ export default function App() {
   };
 
   const clearLocalState = async () => {
-    setScreen('home');
+    setScreen('today');
     setGuidePhase(0);
     setGuideStep(0);
     setAnswers({});
@@ -621,6 +639,10 @@ export default function App() {
     setChecklist({});
     setSelectedChoice(null);
     setInputValue('');
+    setAccountStartDate(new Date().toISOString());
+    setProfile(null);
+    setActiveSignal(null);
+    await clearActiveTrade();
     setSyncStatus(isOnline ? 'synced' : 'offline');
     await AsyncStorage.multiRemove(['profit', 'trades', 'answers', 'guide', OFFLINE_QUEUE_KEY]);
   };
@@ -633,7 +655,11 @@ export default function App() {
         dbHelpers.getGuideProgress(userId),
       ]);
 
-      if (profileRes.data) setTotalProfit(Number(profileRes.data.total_profit || 0));
+      if (profileRes.data) {
+        setTotalProfit(Number(profileRes.data.total_profit || 0));
+        setAccountStartDate(profileRes.data.account_start_date || new Date().toISOString());
+        setProfile(profileRes.data);
+      }
       const normalizedTrades = normalizeTrades(tradesRes.data || []);
       setTrades(normalizedTrades);
       calcToday(normalizedTrades);
@@ -711,7 +737,20 @@ export default function App() {
     const normalized = normalizeTrades(tradesRes.data || []);
     setTrades(normalized);
     calcToday(normalized);
-    if (profileRes.data) setTotalProfit(Number(profileRes.data.total_profit || 0));
+    if (profileRes.data) {
+      setTotalProfit(Number(profileRes.data.total_profit || 0));
+      setAccountStartDate(profileRes.data.account_start_date || new Date().toISOString());
+      setProfile(profileRes.data);
+    }
+  };
+
+  const handleSaveProfile = async (updates) => {
+    if (!user?.id) return { error: new Error('No user session') };
+    const res = await dbHelpers.updateProfile(user.id, updates);
+    if (!res.error && res.data) {
+      setProfile(res.data);
+    }
+    return res;
   };
 
   const saveAll = async (phase, step, newAnswers) => {
@@ -788,6 +827,7 @@ export default function App() {
           trigger: { type: 'daily', hour: a.h, minute: a.m, channelId: 'gft' },
         });
       }
+      await notificationEngine.scheduleMarketHoursNotifications().catch(() => {});
     } catch (error) {
       console.log('Error scheduling notifications:', error);
     }
@@ -911,30 +951,21 @@ export default function App() {
     }
   };
 
-  const handleAuth = async () => {
-    const email = authEmail.trim().toLowerCase();
-    if (!email || !authPassword) {
-      setAuthError('Please enter email and password.');
+  const handleAuth = async ({ mode, email, password }) => {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      throw new Error('Please enter email and password.');
+    }
+
+    if (mode === 'login') {
+      const { error } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password });
+      if (error) throw error;
       return;
     }
 
-    setAuthLoading(true);
-    setAuthError('');
-
-    try {
-      if (authMode === 'login') {
-        const { error } = await supabase.auth.signInWithPassword({ email, password: authPassword });
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.auth.signUp({ email, password: authPassword });
-        if (error) throw error;
-        Alert.alert('Account created', 'Your account is ready. You can start trading now.');
-      }
-    } catch (error) {
-      setAuthError(error?.message || 'Authentication failed. Please try again.');
-    } finally {
-      setAuthLoading(false);
-    }
+    const { error } = await supabase.auth.signUp({ email: normalizedEmail, password });
+    if (error) throw error;
+    Alert.alert('Account created', 'Your account is ready. You can start trading now.');
   };
 
   const handleLogout = async () => {
@@ -974,6 +1005,103 @@ export default function App() {
       losses: 0,
     });
     setSyncStatus('synced');
+  };
+
+  const logAutoTrade = async (profit, note = 'Auto-logged from active trade flow') => {
+    const trade = {
+      id: Date.now().toString(),
+      pair: 'EUR/USD',
+      direction: activeTrade?.direction || 'BUY',
+      profit: Number(profit || 0),
+      note,
+      date: new Date().toISOString(),
+    };
+    const nt = normalizeTrades([trade, ...trades]);
+    const np = parseFloat((totalProfit + Number(profit || 0)).toFixed(2));
+    setTrades(nt);
+    setTotalProfit(np);
+    calcToday(nt);
+    await persistLocalSnapshot({
+      tradesList: nt,
+      total: np,
+      phase: guidePhase,
+      step: guideStep,
+      nextAnswers: answers,
+    });
+
+    const stats = computeDailyStats(nt);
+    if (user?.id && isOnline) {
+      await Promise.all([
+        dbHelpers.addTrade(user.id, trade),
+        dbHelpers.updateTotalProfit(user.id, np),
+        dbHelpers.upsertDailyStats(user.id, stats),
+      ]);
+    } else if (user?.id) {
+      await dbHelpers.addToOfflineQueue({ action: 'ADD_TRADE', data: trade });
+      await dbHelpers.addToOfflineQueue({ action: 'UPDATE_PROFIT', data: { totalProfit: np } });
+      await dbHelpers.addToOfflineQueue({ action: 'UPSERT_DAILY_STATS', data: stats });
+    }
+  };
+
+  const handlePlacedTradeFromSignal = async (entryStatus) => {
+    if (!activeSignal || !['BUY', 'SELL'].includes(activeSignal.signal)) {
+      Alert.alert('No trade signal', 'Wait for a valid BUY/SELL signal first.');
+      return;
+    }
+    const entryPrice = entryStatus?.currentEntry?.price || activeSignal.entry?.price || activeSignal.entry?.range?.split(' - ')?.[0];
+    const stopLoss = entryStatus?.adjustedSL || activeSignal.stopLoss?.price;
+    const takeProfit = entryStatus?.adjustedTP || activeSignal.takeProfit?.price;
+
+    await setActiveTrade({
+      pair: 'EUR/USD',
+      direction: activeSignal.signal,
+      entry_price: entryPrice,
+      stop_loss: stopLoss,
+      take_profit: takeProfit,
+      placed_at: new Date().toISOString(),
+      status: 'OPEN',
+    });
+    if (activeSignal?.id) {
+      await dbHelpers.updateSignalEntryTracking(activeSignal.id, {
+        was_traded: true,
+        user_entry_window: entryStatus?.window || null,
+        actual_entry_price: entryPrice || null,
+        entry_pip_slippage: entryStatus?.pipsFromOriginal || null,
+      });
+    }
+    setScreen('signal');
+  };
+
+  const handleCloseActiveTradeEarly = async () => {
+    const pnl = Number(liveTrade?.estimatedPnL || 0);
+    await logAutoTrade(pnl, 'Closed early from Active Trade screen');
+    await clearActiveTrade();
+    setScreen('today');
+  };
+
+  const handleTradeOutcome = async () => {
+    Alert.alert('Trade outcome', 'Select what happened', [
+      {
+        text: 'Hit TP',
+        onPress: async () => {
+          const pnl = Number(activeSignal?.takeProfit?.potentialGain || liveTrade?.estimatedPnL || 0);
+          await logAutoTrade(pnl, 'Trade hit TP');
+          await clearActiveTrade();
+          setScreen('today');
+        },
+      },
+      {
+        text: 'Hit SL',
+        style: 'destructive',
+        onPress: async () => {
+          const pnl = -Math.abs(Number(activeSignal?.stopLoss?.maxLoss || liveTrade?.estimatedPnL || 0));
+          await logAutoTrade(pnl, 'Trade hit SL');
+          await clearActiveTrade();
+          setScreen('today');
+        },
+      },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
   };
   const truncateEmail = (email = '') => {
     if (email.length <= 24) return email;
@@ -1025,7 +1153,7 @@ export default function App() {
     ? currentStep.checklist?.every((_, i) => checklist[i]) : true;
 
   // ── HOME
-  const HomeScreen = () => (
+  const renderHomeScreen = () => (
     <ScrollView
       style={s.scroll}
       contentContainerStyle={s.scrollContent}
@@ -1111,7 +1239,7 @@ export default function App() {
   );
 
   // ── GUIDE
-  const GuideScreen = () => {
+  const renderGuideScreen = () => {
     if (!currentStep) return null;
     return (
       <View style={{ flex: 1 }}>
@@ -1336,7 +1464,7 @@ export default function App() {
   };
 
   // ── JOURNAL
-  const JournalScreen = () => {
+  const renderJournalScreen = () => {
     const wins = trades.filter(t => t.profit > 0).length;
     const losses = trades.filter(t => t.profit < 0).length;
     const wr = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(0) : 0;
@@ -1418,7 +1546,7 @@ export default function App() {
   };
 
   // ── RULES
-  const RulesScreen = () => (
+  const renderRulesScreen = () => (
     <ScrollView
       style={s.scroll}
       contentContainerStyle={s.scrollContent}
@@ -1447,68 +1575,55 @@ export default function App() {
     </ScrollView>
   );
 
-  const AuthScreen = () => (
-    <KeyboardAvoidingView
-      style={[s.container, { justifyContent: 'center', paddingHorizontal: 18 }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      <View style={[s.card, { borderWidth: 1, borderColor: C.border }]}> 
-        <Text style={[s.headerTitle, { fontSize: 30 }]}>🐐 GFT Coach</Text>
-        <Text style={[s.headerSub, { marginTop: 6 }]}>Secure cloud sync for your trading progress</Text>
-
-        <View style={s.authTabs}>
-          <TouchableOpacity
-            style={[s.authTabBtn, authMode === 'login' && s.authTabActive]}
-            onPress={() => { setAuthMode('login'); setAuthError(''); }}
-          >
-            <Text style={[s.authTabText, authMode === 'login' && s.authTabTextActive]}>LOGIN</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[s.authTabBtn, authMode === 'signup' && s.authTabActive]}
-            onPress={() => { setAuthMode('signup'); setAuthError(''); }}
-          >
-            <Text style={[s.authTabText, authMode === 'signup' && s.authTabTextActive]}>SIGN UP</Text>
-          </TouchableOpacity>
-        </View>
-
-        <TextInput
-          style={[s.textInput, { marginTop: 14 }]}
-          value={authEmail}
-          onChangeText={setAuthEmail}
-          autoCapitalize="none"
-          keyboardType="email-address"
-          placeholder="Email"
-          placeholderTextColor={C.muted}
-        />
-        <TextInput
-          style={[s.textInput, { marginTop: 10 }]}
-          value={authPassword}
-          onChangeText={setAuthPassword}
-          secureTextEntry
-          placeholder="Password"
-          placeholderTextColor={C.muted}
-        />
-
-        {authError ? <Text style={s.authError}>{authError}</Text> : null}
-
-        <TouchableOpacity
-          style={[s.nextBtn, { backgroundColor: C.green, marginTop: 14, opacity: authLoading ? 0.7 : 1 }]}
-          onPress={handleAuth}
-          disabled={authLoading}
-        >
-          <Text style={{ color: '#000', fontWeight: '900', fontSize: 15 }}>
-            {authLoading ? 'Please wait...' : authMode === 'login' ? 'LOGIN' : 'CREATE ACCOUNT'}
-          </Text>
-        </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
+  const renderAICoachScreen = () => <AICoachScreen userId={user?.id} />;
+  const renderTodayScreen = () => (
+    <TodayScreen
+      userId={user?.id}
+      activeSignal={activeSignal}
+      liveTrade={liveTrade}
+      todayPL={todayPL}
+      totalProfit={totalProfit}
+      pacing={pacing}
+      scanStatus={scanStatus}
+      onOpenSignal={() => setScreen('signal')}
+      onOpenAI={() => setScreen('ai')}
+      onOpenChart={() => setScreen('chart')}
+      onManualScan={manualScan}
+    />
   );
+  const renderSignalScreen = () =>
+    activeTrade ? (
+      <ActiveTradeScreen
+        liveTrade={liveTrade}
+        onCloseEarly={handleCloseActiveTradeEarly}
+        onHitOutcome={handleTradeOutcome}
+      />
+    ) : (
+      <SignalScreen
+        signal={activeSignal}
+        onPlacedTrade={handlePlacedTradeFromSignal}
+        onBack={() => setScreen('today')}
+        userId={user?.id}
+      />
+    );
+  const renderChartScreen = () => <ChartScreen />;
+  const renderMarketHoursScreen = () => <MarketHoursScreen onBack={() => setScreen('today')} />;
+  const renderProfileScreen = () => (
+    <ProfileScreen
+      user={user}
+      profile={profile}
+      onSaveProfile={handleSaveProfile}
+      onLogout={handleLogout}
+    />
+  );
+
   const tabs = [
-    { key: 'home', icon: '🏠', label: 'Home' },
-    { key: 'guide', icon: '🗺️', label: 'Guide' },
+    { key: 'today', icon: '📡', label: 'Today' },
+    { key: 'signal', icon: '🎯', label: 'Signal' },
+    { key: 'chart', icon: '📊', label: 'Chart' },
+    { key: 'ai', icon: '🤖', label: 'Coach' },
     { key: 'journal', icon: '📓', label: 'Journal' },
-    { key: 'rules', icon: '📋', label: 'Rules' },
+    { key: 'profile', icon: '👤', label: 'Profile' },
   ];
 
   if (isLoadingAuth) {
@@ -1521,20 +1636,27 @@ export default function App() {
   }
 
   if (!session || !user) {
-    return <AuthScreen />;
+    return <AuthScreen onAuth={handleAuth} />;
   }
 
   return (
     <KeyboardAvoidingView
       style={s.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
     >
       <StatusBar barStyle="light-content" backgroundColor={C.bg} />
-      {screen === 'home'    && <HomeScreen />}
-      {screen === 'guide'   && <GuideScreen />}
-      {screen === 'journal' && <JournalScreen />}
-      {screen === 'rules'   && <RulesScreen />}
+      {screen !== 'marketHours' && <MarketStatusBar onPress={() => setScreen('marketHours')} />}
+      {screen === 'today'   && renderTodayScreen()}
+      {screen === 'signal'  && renderSignalScreen()}
+      {screen === 'chart'   && renderChartScreen()}
+      {screen === 'marketHours' && renderMarketHoursScreen()}
+      {screen === 'guide'   && renderGuideScreen()}
+      {screen === 'ai'      && renderAICoachScreen()}
+      {screen === 'journal' && renderJournalScreen()}
+      {screen === 'profile' && renderProfileScreen()}
+      {screen === 'rules'   && renderRulesScreen()}
+      {screen !== 'ai' && <AICoachBubble onPress={() => setScreen('ai')} />}
       <View style={s.bottomNav}>
         {tabs.map(tab => (
           <TouchableOpacity key={tab.key} style={[s.navItem, screen === tab.key && s.navActive]} onPress={() => setScreen(tab.key)}>
@@ -1600,12 +1722,6 @@ const s = StyleSheet.create({
   linkBox:      { borderRadius: 12, padding: 14, marginBottom: 12, borderWidth: 1 },
   inputWrap:    { backgroundColor: C.card, borderRadius: 12, padding: 14, marginBottom: 12 },
   textInput:    { backgroundColor: C.card2, borderRadius: 10, padding: 12, color: C.text, fontSize: 15, borderWidth: 1, borderColor: C.border },
-  authTabs:     { flexDirection: 'row', backgroundColor: C.card2, borderRadius: 12, borderWidth: 1, borderColor: C.border, marginTop: 16, padding: 4 },
-  authTabBtn:   { flex: 1, borderRadius: 8, paddingVertical: 10, alignItems: 'center' },
-  authTabActive:{ backgroundColor: C.bg },
-  authTabText:  { color: C.muted, fontSize: 12, fontWeight: '800' },
-  authTabTextActive: { color: C.green },
-  authError:    { color: C.red, marginTop: 10, fontSize: 12, fontWeight: '600' },
   tzRow:        { borderLeftWidth: 3, paddingLeft: 12, paddingVertical: 8, marginBottom: 8 },
   choiceBtn:    { backgroundColor: C.card2, borderRadius: 12, padding: 14, marginBottom: 8, borderWidth: 1, borderColor: C.border },
   choiceTxt:    { fontSize: 15, fontWeight: '700' },
