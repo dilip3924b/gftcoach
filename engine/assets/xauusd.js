@@ -1,8 +1,12 @@
 import { getMasterTechnicalScore } from '../technicals';
 
 export const analyzeXAUUSD = ({ history, price, eurusd }) => {
-  const spreadAsPipsEquivalent = Number(price?.spread || 0) / 10;
-  const technicals = getMasterTechnicalScore(history || [], Number(price?.bid || 0), spreadAsPipsEquivalent);
+  const technicals = getMasterTechnicalScore(
+    history || [],
+    Number(price?.bid || 0),
+    Number(price?.spread || 0),
+    { pipSize: 1, proximityUnits: 8, decimals: 2, spreadType: 'dollars' }
+  );
   const eurChange = Number(eurusd?.change24h || 0);
   const inferredDxyTrend = eurChange > 0 ? 'FALLING' : eurChange < 0 ? 'RISING' : 'FLAT';
 

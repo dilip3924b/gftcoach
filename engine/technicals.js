@@ -48,7 +48,10 @@ export const detectTrend = (priceHistory, periods = 20) => {
   };
 };
 
-export const findKeyLevels = (priceHistory = []) => {
+export const findKeyLevels = (priceHistory = [], opts = {}) => {
+  const pipSize = Number(opts?.pipSize || 0.0001);
+  const proximityUnits = Number(opts?.proximityUnits || 10);
+  const decimals = Number.isInteger(opts?.decimals) ? opts.decimals : 5;
   const candles = priceHistory.slice(-60);
   const highs = candles.map((c) => Number(c.high || 0)).filter(Boolean);
   const lows = candles.map((c) => Number(c.low || 0)).filter(Boolean);
@@ -79,19 +82,19 @@ export const findKeyLevels = (priceHistory = []) => {
 
   const nearestSupport = supports.find((s) => s <= current) || supports[supports.length - 1];
   const nearestResistance = resistances.find((r) => r >= current) || resistances[0];
-  const distanceToSupport = Math.round(Math.abs((current - nearestSupport) / 0.0001));
-  const distanceToResistance = Math.round(Math.abs((nearestResistance - current) / 0.0001));
+  const distanceToSupport = Math.round(Math.abs((current - nearestSupport) / pipSize));
+  const distanceToResistance = Math.round(Math.abs((nearestResistance - current) / pipSize));
 
   let currentZone = 'midrange';
-  if (distanceToSupport <= 10) currentZone = 'approaching_support';
-  if (distanceToResistance <= 10) currentZone = 'approaching_resistance';
+  if (distanceToSupport <= proximityUnits) currentZone = 'approaching_support';
+  if (distanceToResistance <= proximityUnits) currentZone = 'approaching_resistance';
 
   return {
-    resistance: resistances.map((v) => Number(v.toFixed(5))),
-    support: supports.map((v) => Number(v.toFixed(5))),
+    resistance: resistances.map((v) => Number(v.toFixed(decimals))),
+    support: supports.map((v) => Number(v.toFixed(decimals))),
     currentZone,
-    nearestSupport: Number(nearestSupport.toFixed(5)),
-    nearestResistance: Number(nearestResistance.toFixed(5)),
+    nearestSupport: Number(nearestSupport.toFixed(decimals)),
+    nearestResistance: Number(nearestResistance.toFixed(decimals)),
     distanceToSupport,
     distanceToResistance,
   };
@@ -162,7 +165,6 @@ export const detectCandlePattern = (candles = []) => {
   if (set.length < 2) return { pattern: 'none', signal: 'neutral', strength: 'weak', description: 'No pattern.' };
 
   const [c1, c2] = set.slice(-2);
-  const body1 = Math.abs(c1.close - c1.open);
   const body2 = Math.abs(c2.close - c2.open);
   const bullish1 = c1.close > c1.open;
   const bullish2 = c2.close > c2.open;
@@ -190,8 +192,21 @@ export const detectCandlePattern = (candles = []) => {
   return { pattern: 'none', signal: 'neutral', strength: 'weak', description: 'No clear candle pattern.' };
 };
 
-export const isSpreadAcceptable = (spreadPips) => {
-  const spread = Number(spreadPips || 0);
+export const isSpreadAcceptable = (spreadValue, spreadType = 'pips') => {
+  const spread = Number(spreadValue || 0);
+  if (spreadType === 'dollars') {
+    if (spread <= 1) {
+      return { acceptable: true, quality: 'excellent', maxRecommendedSL: 120, note: 'Very tight gold spread.' };
+    }
+    if (spread <= 2) {
+      return { acceptable: true, quality: 'good', maxRecommendedSL: 150, note: 'Good gold spread.' };
+    }
+    if (spread <= 3) {
+      return { acceptable: true, quality: 'ok', maxRecommendedSL: 180, note: 'Acceptable gold spread, watch entry.' };
+    }
+    return { acceptable: false, quality: 'bad', maxRecommendedSL: 250, note: 'Gold spread too high. Wait.' };
+  }
+
   if (spread <= 2) {
     return { acceptable: true, quality: 'excellent', maxRecommendedSL: 20, note: 'Very tight spread.' };
   }
@@ -204,13 +219,18 @@ export const isSpreadAcceptable = (spreadPips) => {
   return { acceptable: false, quality: 'bad', maxRecommendedSL: 50, note: 'Spread too high. Wait.' };
 };
 
-export const getMasterTechnicalScore = (priceHistory, currentPrice, spreadPips) => {
+export const getMasterTechnicalScore = (priceHistory, currentPrice, spreadValue, options = {}) => {
+  const pipSize = Number(options?.pipSize || 0.0001);
+  const proximityUnits = Number(options?.proximityUnits || 10);
+  const decimals = Number.isInteger(options?.decimals) ? options.decimals : 5;
+  const spreadType = options?.spreadType || 'pips';
+
   const trend = detectTrend(priceHistory);
-  const levels = findKeyLevels(priceHistory);
+  const levels = findKeyLevels(priceHistory, { pipSize, proximityUnits, decimals });
   const rsi = calculateRSI(priceHistory);
   const ma = calculateMAs(priceHistory);
   const candle = detectCandlePattern(priceHistory.slice(-3));
-  const spread = isSpreadAcceptable(spreadPips);
+  const spread = isSpreadAcceptable(spreadValue, spreadType);
 
   let score = 0;
   const reasons = [];
