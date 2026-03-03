@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { C } from '../lib/constants';
 import { isCurrentlyDangerZone } from '../lib/api';
 import { getNextMarketOpen, isMarketOpen } from '../engine/marketHours';
@@ -7,6 +8,7 @@ import { getNextMarketOpen, isMarketOpen } from '../engine/marketHours';
 const alpha = (hex, opacityHex) => `${hex}${opacityHex}`;
 
 export default function MarketStatusBar({ onPress }) {
+  const insets = useSafeAreaInsets();
   const [danger, setDanger] = useState({ isDanger: false, event: null, minutesUntilSafe: 0 });
   const [market, setMarket] = useState(isMarketOpen());
 
@@ -61,7 +63,14 @@ export default function MarketStatusBar({ onPress }) {
   }, [danger, market]);
 
   return (
-    <TouchableOpacity activeOpacity={0.85} onPress={onPress} style={[styles.wrap, { backgroundColor: model.bg, borderColor: model.border }]}>
+    <TouchableOpacity
+      activeOpacity={0.85}
+      onPress={onPress}
+      style={[
+        styles.wrap,
+        { backgroundColor: model.bg, borderColor: model.border, marginTop: Math.max(insets.top + 6, 10) },
+      ]}
+    >
       <Text numberOfLines={1} style={[styles.txt, { color: model.text }]}>{model.label}</Text>
     </TouchableOpacity>
   );
@@ -70,7 +79,6 @@ export default function MarketStatusBar({ onPress }) {
 const styles = StyleSheet.create({
   wrap: {
     marginHorizontal: 12,
-    marginTop: 8,
     marginBottom: 6,
     borderWidth: 1,
     borderRadius: 10,

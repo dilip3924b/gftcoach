@@ -22,10 +22,16 @@ import ChartScreen from './screens/ChartScreen';
 import ProfileScreen from './screens/ProfileScreen';
 import MarketHoursScreen from './screens/MarketHoursScreen';
 import MarketStatusBar from './components/MarketStatusBar';
+import OnboardingScreen from './screens/OnboardingScreen';
+import AssetSelectScreen from './screens/AssetSelectScreen';
+import AIThinkingScreen from './screens/AIThinkingScreen';
 import { useMarketScanner } from './hooks/useMarketScanner';
 import { useActiveTrade } from './hooks/useActiveTrade';
 import { useGoalPacing } from './hooks/useGoalPacing';
 import { notificationEngine } from './engine/notificationEngine';
+import { seedCandleHistory } from './engine/candleSeeder';
+import { getLatestMultiSignals, scanAllAssets } from './engine/multiAssetScanner';
+import { getTradeReview } from './lib/groq';
 
 
 const { width } = Dimensions.get('window');
@@ -457,6 +463,10 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [selectedAsset, setSelectedAsset] = useState('EURUSD');
+  const [multiSignals, setMultiSignals] = useState([]);
+  const [onboardingDone, setOnboardingDone] = useState(true);
+  const [latestReview, setLatestReview] = useState('');
   const [accountStartDate, setAccountStartDate] = useState(new Date().toISOString());
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const [isOnline, setIsOnline] = useState(true);
@@ -464,7 +474,15 @@ export default function App() {
   const fadeAnim  = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(40)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
-  const { scanStatus, activeSignal, setActiveSignal, manualScan } = useMarketScanner(user?.id);
+  const {
+    scanStatus,
+    activeSignal,
+    setActiveSignal,
+    manualScan,
+    lastScanAt,
+    nextScanAt,
+    lastNoSignalReason,
+  } = useMarketScanner(user?.id);
   const { activeTrade, liveTrade, setActiveTrade, clearActiveTrade } = useActiveTrade();
   const pacing = useGoalPacing(totalProfit, accountStartDate);
 
@@ -475,6 +493,47 @@ export default function App() {
 
   useEffect(() => { registerNotif(); scheduleAlarms(); pulseLoop(); }, []);
   useEffect(() => { if (screen === 'guide') animStep(); }, [guidePhase, guideStep, screen]);
+  useEffect(() => {
+    const routeFromNotif = (data = {}, actionId = Notifications.DEFAULT_ACTION_IDENTIFIER) => {
+      const symbol = String(data?.symbol || '').toUpperCase();
+      if (symbol) {
+        setSelectedAsset(symbol);
+        const candidate = (multiSignals || []).find((s) => s.symbol === symbol);
+        if (candidate) setActiveSignal(candidate);
+      }
+      if (actionId === 'OPEN_CHART') {
+        setScreen('chart');
+        return;
+      }
+      const target = String(data?.screen || '').toLowerCase();
+      if (target === 'signal') setScreen('signal');
+      else if (target === 'coach' || target === 'ai') setScreen('ai');
+      else if (target === 'chart') setScreen('chart');
+      else if (target === 'profile') setScreen('profile');
+      else setScreen('today');
+    };
+
+    const responseSub = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response?.notification?.request?.content?.data || {};
+      routeFromNotif(data, response?.actionIdentifier);
+    });
+
+    return () => {
+      responseSub.remove();
+    };
+  }, [multiSignals, setActiveSignal]);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      const latest = await getLatestMultiSignals().catch(() => null);
+      if (!mounted || !latest?.length) return;
+      setMultiSignals(latest);
+      const selected = latest.find((s) => s.symbol === selectedAsset) || latest[0];
+      if (selected?.signal) setActiveSignal(selected);
+    };
+    load();
+    return () => { mounted = false; };
+  }, [selectedAsset, setActiveSignal]);
   useEffect(() => {
     if (!session || !user || screen !== 'today') return undefined;
     const timer = setInterval(() => setNow(new Date()), 1000);
@@ -562,6 +621,15 @@ export default function App() {
 
   useEffect(() => {
     if (!user?.id) return undefined;
+    seedCandleHistory().catch(() => {});
+    const id = setInterval(() => {
+      seedCandleHistory().catch(() => {});
+    }, 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, [user?.id]);
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
 
     const channel = supabase
       .channel(`trades-${user.id}`)
@@ -641,6 +709,8 @@ export default function App() {
     setInputValue('');
     setAccountStartDate(new Date().toISOString());
     setProfile(null);
+    setOnboardingDone(true);
+    setLatestReview('');
     setActiveSignal(null);
     await clearActiveTrade();
     setSyncStatus(isOnline ? 'synced' : 'offline');
@@ -654,6 +724,8 @@ export default function App() {
         dbHelpers.getTrades(userId),
         dbHelpers.getGuideProgress(userId),
       ]);
+      const prefsRes = await dbHelpers.getUserPreferences(userId);
+      setOnboardingDone(Boolean(prefsRes?.data?.onboarding_done));
 
       if (profileRes.data) {
         setTotalProfit(Number(profileRes.data.total_profit || 0));
@@ -803,6 +875,10 @@ export default function App() {
           vibrationPattern: [0, 500, 200, 500], sound: true,
         });
       }
+      await Notifications.setNotificationCategoryAsync('SIGNAL_ACTIONS', [
+        { identifier: 'OPEN_SIGNAL', buttonTitle: 'Open Signal' },
+        { identifier: 'OPEN_CHART', buttonTitle: 'Open Chart' },
+      ]);
     } catch (error) {
       console.log('Notification setup failed:', error);
     }
@@ -827,6 +903,9 @@ export default function App() {
           trigger: { type: 'daily', hour: a.h, minute: a.m, channelId: 'gft' },
         });
       }
+      await notificationEngine.scheduleBestWindowAlert().catch(() => {});
+      await notificationEngine.scheduleFridayCloseWarning().catch(() => {});
+      await notificationEngine.scheduleWeeklyReview().catch(() => {});
       await notificationEngine.scheduleMarketHoursNotifications().catch(() => {});
     } catch (error) {
       console.log('Error scheduling notifications:', error);
@@ -900,7 +979,15 @@ export default function App() {
       Alert.alert('🚨 DAILY LIMIT HIT!', 'You\'ve reached the $30 daily loss limit.\n\nRule: NO MORE TRADES today.\n\nCome back tomorrow fresh and with a clear head.'); return;
     }
 
-    const trade = { id: Date.now().toString(), pair: tradePair, direction: tradeDir, profit: p, note: tradeNote, date: new Date().toISOString() };
+    const trade = {
+      id: Date.now().toString(),
+      pair: tradePair,
+      symbol: String(tradePair || 'EUR/USD').replace('/', ''),
+      direction: tradeDir,
+      profit: p,
+      note: tradeNote,
+      date: new Date().toISOString(),
+    };
     const nt = normalizeTrades([trade, ...trades]);
     const np = parseFloat((totalProfit + p).toFixed(2));
     setTrades(nt); setTotalProfit(np); calcToday(nt);
@@ -949,6 +1036,11 @@ export default function App() {
     } else {
       Alert.alert(p > 0 ? '✅ Trade Logged!' : '📉 Loss Logged', `${p > 0 ? '+' : ''}${p}\nRunning total: ${np}\nTo $100 goal: ${Math.max(0, 100 - np).toFixed(2)} left`);
     }
+
+    if (user?.id) {
+      const review = await getTradeReview(user.id, trade).catch(() => null);
+      if (review?.content) setLatestReview(review.content);
+    }
   };
 
   const handleAuth = async ({ mode, email, password }) => {
@@ -967,6 +1059,28 @@ export default function App() {
     if (error) throw error;
     Alert.alert('Account created', 'Your account is ready. You can start trading now.');
   };
+
+  const runMultiAssetScan = async () => {
+    if (!user?.id) return;
+    const result = await scanAllAssets(user.id).catch(() => null);
+    const signals = result?.signals || [];
+    setMultiSignals(signals);
+    const selected = signals.find((s) => s.symbol === selectedAsset) || result?.bestSignal || null;
+    if (selected) {
+      setActiveSignal(selected);
+      return selected;
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    if (!user?.id) return undefined;
+    runMultiAssetScan();
+    const interval = setInterval(() => {
+      runMultiAssetScan();
+    }, 30 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [user?.id, selectedAsset]);
 
   const handleLogout = async () => {
     await supabase.auth.signOut();
@@ -1010,7 +1124,8 @@ export default function App() {
   const logAutoTrade = async (profit, note = 'Auto-logged from active trade flow') => {
     const trade = {
       id: Date.now().toString(),
-      pair: 'EUR/USD',
+      pair: activeTrade?.pair || 'EUR/USD',
+      symbol: String(activeTrade?.symbol || activeTrade?.pair || 'EURUSD').replace('/', ''),
       direction: activeTrade?.direction || 'BUY',
       profit: Number(profit || 0),
       note,
@@ -1041,6 +1156,11 @@ export default function App() {
       await dbHelpers.addToOfflineQueue({ action: 'UPDATE_PROFIT', data: { totalProfit: np } });
       await dbHelpers.addToOfflineQueue({ action: 'UPSERT_DAILY_STATS', data: stats });
     }
+
+    if (user?.id) {
+      const review = await getTradeReview(user.id, trade).catch(() => null);
+      if (review?.content) setLatestReview(review.content);
+    }
   };
 
   const handlePlacedTradeFromSignal = async (entryStatus) => {
@@ -1052,8 +1172,15 @@ export default function App() {
     const stopLoss = entryStatus?.adjustedSL || activeSignal.stopLoss?.price;
     const takeProfit = entryStatus?.adjustedTP || activeSignal.takeProfit?.price;
 
+    const pairFromSignal = activeSignal?.symbol === 'XAUUSD'
+      ? 'XAU/USD'
+      : activeSignal?.symbol === 'BTCUSD'
+        ? 'BTC/USD'
+        : 'EUR/USD';
+
     await setActiveTrade({
-      pair: 'EUR/USD',
+      symbol: activeSignal?.symbol || 'EURUSD',
+      pair: pairFromSignal,
       direction: activeSignal.signal,
       entry_price: entryPrice,
       stop_loss: stopLoss,
@@ -1072,34 +1199,97 @@ export default function App() {
     setScreen('signal');
   };
 
-  const handleCloseActiveTradeEarly = async () => {
-    const pnl = Number(liveTrade?.estimatedPnL || 0);
-    await logAutoTrade(pnl, 'Closed early from Active Trade screen');
+  const finalizeActiveTrade = async ({ type = 'EARLY', closePrice = null } = {}) => {
+    if (!activeTrade) return;
+    const symbol = String(activeTrade?.symbol || activeTrade?.pair || 'EURUSD').replace('/', '').toUpperCase();
+    const entry = Number(activeTrade?.entry_price || 0);
+    const sl = Number(activeTrade?.stop_loss || 0);
+    const tp = Number(activeTrade?.take_profit || 0);
+    const direction = String(activeTrade?.direction || 'BUY').toUpperCase();
+    const pipSize = symbol === 'EURUSD' ? 0.0001 : 1;
+    const unitValue = symbol === 'EURUSD' ? 0.1 : 0.01;
+
+    const slUnits = Math.round(Math.abs(entry - sl) / pipSize);
+    const tpUnits = Math.round(Math.abs(tp - entry) / pipSize);
+    let pnl = Number(liveTrade?.estimatedPnL || 0);
+    if (type === 'TP') pnl = Number((tpUnits * unitValue).toFixed(2));
+    if (type === 'SL') pnl = -Math.abs(Number((slUnits * unitValue).toFixed(2)));
+    if (type === 'MANUAL' && Number.isFinite(Number(closePrice))) {
+      const cp = Number(closePrice);
+      const delta = direction === 'BUY' ? (cp - entry) / pipSize : (entry - cp) / pipSize;
+      pnl = Number((delta * unitValue).toFixed(2));
+    }
+
+    const note = type === 'TP'
+      ? 'Trade hit TP'
+      : type === 'SL'
+        ? 'Trade hit SL'
+        : type === 'MANUAL'
+          ? `Manual close at ${closePrice}`
+          : 'Closed early from Active Trade screen';
+
+    const trade = {
+      id: Date.now().toString(),
+      pair: activeTrade?.pair || (symbol === 'XAUUSD' ? 'XAU/USD' : symbol === 'BTCUSD' ? 'BTC/USD' : 'EUR/USD'),
+      symbol,
+      direction,
+      profit: pnl,
+      note,
+      date: new Date().toISOString(),
+      entry_price: entry || null,
+      exit_price: type === 'TP' ? tp : type === 'SL' ? sl : (Number(closePrice) || liveTrade?.currentPrice || null),
+      stop_loss: sl || null,
+      take_profit: tp || null,
+      close_reason: type,
+    };
+
+    const nt = normalizeTrades([trade, ...trades]);
+    const np = parseFloat((totalProfit + Number(pnl || 0)).toFixed(2));
+    setTrades(nt);
+    setTotalProfit(np);
+    calcToday(nt);
+    await persistLocalSnapshot({
+      tradesList: nt,
+      total: np,
+      phase: guidePhase,
+      step: guideStep,
+      nextAnswers: answers,
+    });
+
+    const stats = computeDailyStats(nt);
+    if (user?.id && isOnline) {
+      await Promise.all([
+        dbHelpers.addTrade(user.id, trade),
+        dbHelpers.updateTotalProfit(user.id, np),
+        dbHelpers.upsertDailyStats(user.id, stats),
+      ]);
+    } else if (user?.id) {
+      await dbHelpers.addToOfflineQueue({ action: 'ADD_TRADE', data: trade });
+      await dbHelpers.addToOfflineQueue({ action: 'UPDATE_PROFIT', data: { totalProfit: np } });
+      await dbHelpers.addToOfflineQueue({ action: 'UPSERT_DAILY_STATS', data: stats });
+    }
+
+    if (user?.id) {
+      const review = await getTradeReview(user.id, trade).catch(() => null);
+      if (review?.content) setLatestReview(review.content);
+    }
+
     await clearActiveTrade();
     setScreen('today');
   };
 
-  const handleTradeOutcome = async () => {
+  const handleCloseActiveTradeEarly = async (payload = {}) => {
+    await finalizeActiveTrade({ type: payload?.type || 'EARLY', closePrice: payload?.closePrice ?? null });
+  };
+
+  const handleTradeOutcome = async (payload = {}) => {
+    if (payload?.type) {
+      await finalizeActiveTrade({ type: payload.type, closePrice: payload?.closePrice ?? null });
+      return;
+    }
     Alert.alert('Trade outcome', 'Select what happened', [
-      {
-        text: 'Hit TP',
-        onPress: async () => {
-          const pnl = Number(activeSignal?.takeProfit?.potentialGain || liveTrade?.estimatedPnL || 0);
-          await logAutoTrade(pnl, 'Trade hit TP');
-          await clearActiveTrade();
-          setScreen('today');
-        },
-      },
-      {
-        text: 'Hit SL',
-        style: 'destructive',
-        onPress: async () => {
-          const pnl = -Math.abs(Number(activeSignal?.stopLoss?.maxLoss || liveTrade?.estimatedPnL || 0));
-          await logAutoTrade(pnl, 'Trade hit SL');
-          await clearActiveTrade();
-          setScreen('today');
-        },
-      },
+      { text: 'Hit TP', onPress: async () => finalizeActiveTrade({ type: 'TP' }) },
+      { text: 'Hit SL', style: 'destructive', onPress: async () => finalizeActiveTrade({ type: 'SL' }) },
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
@@ -1143,8 +1333,8 @@ export default function App() {
     if (istNowMinutes >= (13 * 60 + 30) && istNowMinutes < (18 * 60 + 30)) {
       return { label: '🟡 London Session', advice: 'Tradable session; wait for clean setups.', color: C.yellow };
     }
-    if (istNowMinutes >= (22 * 60 + 30) && istNowMinutes < (23 * 60)) {
-      return { label: '🟠 NY Closing', advice: 'Close trades; avoid opening new positions.', color: C.orange };
+    if (istNowMinutes >= (22 * 60 + 30) || istNowMinutes < (3 * 60 + 30)) {
+      return { label: '🟠 NY Session', advice: 'Lower quality than overlap; only trade top setups.', color: C.orange };
     }
     return { label: '😴 Dead Zone', advice: 'Low-quality session; avoid trading.', color: C.muted };
   };
@@ -1468,6 +1658,12 @@ export default function App() {
     const wins = trades.filter(t => t.profit > 0).length;
     const losses = trades.filter(t => t.profit < 0).length;
     const wr = trades.length > 0 ? ((wins / trades.length) * 100).toFixed(0) : 0;
+    const assetEmoji = (symbol) => {
+      const s = String(symbol || '').toUpperCase();
+      if (s.includes('XAU') || s.includes('GOLD')) return '🥇';
+      if (s.includes('BTC')) return '₿';
+      return '💶';
+    };
     return (
       <ScrollView
         style={s.scroll}
@@ -1490,7 +1686,7 @@ export default function App() {
             ))}
           </View>
           <View style={s.row}>
-            {['EUR/USD', 'AUD/USD', 'GBP/USD'].map(p => (
+            {['EUR/USD', 'XAU/USD', 'BTC/USD'].map(p => (
               <TouchableOpacity key={p} style={[s.pairBtn, tradePair === p && { borderColor: C.blue }]} onPress={() => setTradePair(p)}>
                 <Text style={[{ fontSize: 12, fontWeight: '600' }, tradePair === p ? { color: C.blue } : { color: C.muted }]}>{p}</Text>
               </TouchableOpacity>
@@ -1502,6 +1698,12 @@ export default function App() {
             <Text style={{ color: '#000', fontWeight: '900', fontSize: 15 }}>✅ LOG TRADE</Text>
           </TouchableOpacity>
         </View>
+        {!!latestReview && (
+          <View style={[s.card, { borderLeftWidth: 4, borderLeftColor: C.blue }]}>
+            <Text style={s.cardTitle}>🤖 AI Review</Text>
+            <Text style={[s.muted, { color: C.text, lineHeight: 20 }]}>{latestReview}</Text>
+          </View>
+        )}
         {trades.length > 0 && (
           <View style={s.card}>
             <View style={s.row}>
@@ -1523,8 +1725,8 @@ export default function App() {
           trades.map(t => (
             <View key={t.id} style={[s.card, { borderLeftWidth: 4, borderLeftColor: t.profit >= 0 ? C.green : C.red }]}>
               <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ fontSize: 15, fontWeight: '700', color: C.text }}>{t.direction === 'BUY' ? '📈' : '📉'} {t.pair}</Text>
-                <Text style={[{ fontSize: 18, fontWeight: '900' }, { color: t.profit >= 0 ? C.green : C.red }]}>{t.profit >= 0 ? '+' : ''}${t.profit}</Text>
+                <Text style={{ fontSize: 15, fontWeight: '700', color: C.text }}>{assetEmoji(t.symbol || t.pair)} {t.direction === 'BUY' ? '📈' : '📉'} {t.pair}</Text>
+                <Text style={[{ fontSize: 18, fontWeight: '900' }, { color: t.profit >= 0 ? C.green : C.red }]}>{t.profit >= 0 ? `+$${Number(t.profit).toFixed(2)}` : `-$${Math.abs(Number(t.profit)).toFixed(2)}`}</Text>
               </View>
               <Text style={[s.muted, { marginTop: 4 }]}>{new Date(t.date).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</Text>
               {t.note ? <Text style={[s.muted, { marginTop: 6, fontStyle: 'italic' }]}>💬 {t.note}</Text> : null}
@@ -1576,6 +1778,21 @@ export default function App() {
   );
 
   const renderAICoachScreen = () => <AICoachScreen userId={user?.id} />;
+  const renderAssetSelectScreen = () => (
+    <AssetSelectScreen
+      selectedSymbol={selectedAsset}
+      onSelect={(symbol) => {
+        setSelectedAsset(symbol);
+        const candidate = multiSignals.find((s) => s.symbol === symbol);
+        if (candidate) setActiveSignal(candidate);
+        setScreen('signal');
+      }}
+      onBack={() => setScreen('today')}
+    />
+  );
+  const renderAIThinkingScreen = () => (
+    <AIThinkingScreen signal={activeSignal} onBack={() => setScreen('signal')} />
+  );
   const renderTodayScreen = () => (
     <TodayScreen
       userId={user?.id}
@@ -1586,9 +1803,13 @@ export default function App() {
       pacing={pacing}
       scanStatus={scanStatus}
       onOpenSignal={() => setScreen('signal')}
+      onOpenAssetSelect={() => setScreen('asset')}
       onOpenAI={() => setScreen('ai')}
       onOpenChart={() => setScreen('chart')}
-      onManualScan={manualScan}
+      onManualScan={async () => {
+        await manualScan();
+        await runMultiAssetScan();
+      }}
     />
   );
   const renderSignalScreen = () =>
@@ -1603,7 +1824,13 @@ export default function App() {
         signal={activeSignal}
         onPlacedTrade={handlePlacedTradeFromSignal}
         onBack={() => setScreen('today')}
+        onOpenThinking={() => setScreen('thinking')}
         userId={user?.id}
+        scanStatus={scanStatus}
+        lastScanAt={lastScanAt}
+        nextScanAt={nextScanAt}
+        noSignalReason={lastNoSignalReason}
+        lastScanResults={multiSignals}
       />
     );
   const renderChartScreen = () => <ChartScreen />;
@@ -1616,9 +1843,31 @@ export default function App() {
       onLogout={handleLogout}
     />
   );
+  const renderOnboarding = () => (
+    <OnboardingScreen
+      userId={user?.id}
+      onDone={async (prefs) => {
+        if (user?.id) {
+          await dbHelpers.upsertUserPreferences(user.id, {
+            onboarding_done: true,
+            availability_start: prefs?.availability_start || '18:00',
+            availability_end: prefs?.availability_end || '22:30',
+            mt5_installed: Boolean(prefs?.mt5_installed),
+          });
+          await dbHelpers.updateAccountStartDate(
+            user.id,
+            prefs?.account_start_date || new Date().toISOString().slice(0, 10)
+          );
+        }
+        setOnboardingDone(true);
+        setScreen('today');
+      }}
+    />
+  );
 
   const tabs = [
     { key: 'today', icon: '📡', label: 'Today' },
+    { key: 'asset', icon: '🧭', label: 'Assets' },
     { key: 'signal', icon: '🎯', label: 'Signal' },
     { key: 'chart', icon: '📊', label: 'Chart' },
     { key: 'ai', icon: '🤖', label: 'Coach' },
@@ -1629,7 +1878,7 @@ export default function App() {
   if (isLoadingAuth) {
     return (
       <View style={[s.container, { alignItems: 'center', justifyContent: 'center' }]}>
-        <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+        <StatusBar hidden animated barStyle="light-content" backgroundColor={C.bg} />
         <Text style={{ color: C.text, fontSize: 16, fontWeight: '700' }}>Loading your coach...</Text>
       </View>
     );
@@ -1639,16 +1888,27 @@ export default function App() {
     return <AuthScreen onAuth={handleAuth} />;
   }
 
+  if (!onboardingDone) {
+    return (
+      <View style={s.container}>
+        <StatusBar hidden animated barStyle="light-content" backgroundColor={C.bg} />
+        {renderOnboarding()}
+      </View>
+    );
+  }
+
   return (
     <KeyboardAvoidingView
       style={s.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 8 : 0}
     >
-      <StatusBar barStyle="light-content" backgroundColor={C.bg} />
+      <StatusBar hidden animated barStyle="light-content" backgroundColor={C.bg} />
       {screen !== 'marketHours' && <MarketStatusBar onPress={() => setScreen('marketHours')} />}
       {screen === 'today'   && renderTodayScreen()}
+      {screen === 'asset'   && renderAssetSelectScreen()}
       {screen === 'signal'  && renderSignalScreen()}
+      {screen === 'thinking' && renderAIThinkingScreen()}
       {screen === 'chart'   && renderChartScreen()}
       {screen === 'marketHours' && renderMarketHoursScreen()}
       {screen === 'guide'   && renderGuideScreen()}

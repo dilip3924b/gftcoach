@@ -8,6 +8,7 @@ import { generateFinalSignal } from './signalGenerator';
 import { notificationEngine } from './notificationEngine';
 import { tradeTracker } from './tradeTracker';
 import { isScannerAllowedNow } from './marketHours';
+import { getCandleHistory } from './candleSeeder';
 
 const SCANNER_TASK = 'GFT_MARKET_SCANNER';
 const SCAN_INTERVAL_MINUTES = 30;
@@ -44,18 +45,23 @@ const aggregateToCandles = (ticks = []) => {
 };
 
 export const getPriceHistory = async () => {
+  const seeded = await getCandleHistory('EURUSD').catch(() => []);
+  if (seeded?.length) return seeded.slice(-80);
   const raw = await AsyncStorage.getItem(TICK_KEY);
   const ticks = raw ? JSON.parse(raw) : [];
   return aggregateToCandles(ticks).slice(-80);
 };
 
 const shouldScan = async () => {
-  if (!isScannerAllowedNow()) return false;
+  if (!isScannerAllowedNow()) return { ok: false, reason: 'Market closed or wrong session.' };
   const session = getCurrentTradingSession();
   const isGoodSession = ['london', 'overlap'].includes(session.session);
   const danger = await isCurrentlyDangerZone().catch(() => ({ isDanger: false }));
   const active = await tradeTracker.getActiveTrade();
-  return isGoodSession && !danger.isDanger && !active;
+  if (!isGoodSession) return { ok: false, reason: `Wrong session (${session.label}).` };
+  if (danger.isDanger) return { ok: false, reason: 'Danger zone active (high-impact news window).' };
+  if (active) return { ok: false, reason: 'Active trade already open.' };
+  return { ok: true, reason: '' };
 };
 
 const saveSignal = async (userId, signal) => {
@@ -96,8 +102,9 @@ export const performScan = async (userId) => {
       return { scanned: false, reason: 'Market closed or restricted session.' };
     }
 
-    if (!(await shouldScan())) {
-      return { scanned: false, reason: 'Conditions not valid for scanning.' };
+    const gate = await shouldScan();
+    if (!gate.ok) {
+      return { scanned: false, reason: gate.reason || 'Conditions not valid for scanning.' };
     }
 
     const [prices, calendar, todayStats] = await Promise.all([

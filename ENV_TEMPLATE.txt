@@ -1,4 +1,21 @@
+# Supabase
 EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
 EXPO_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
-EXPO_PUBLIC_EXCHANGE_RATE_API_KEY=YOUR_EXCHANGE_RATE_API_KEY
-EXPO_PUBLIC_GROQ_API_KEY=gsk_YOUR_GROQ_API_KEY
+
+# Groq
+EXPO_PUBLIC_GROQ_API_KEY=YOUR_GROQ_API_KEY
+
+# Gold price (free key)
+EXPO_PUBLIC_GOLDAPI_KEY=YOUR_GOLDAPI_KEY
+
+# Optional crypto fallback (not required)
+EXPO_PUBLIC_CRYPTOPANIC_KEY=YOUR_CRYPTOPANIC_KEY
+
+# No key required:
+# - Frankfurter (EUR/USD + XAU fallback)
+# - open.er-api.com (EUR/USD fallback)
+# - CoinGecko (BTC/USD)
+# - Binance (BTC fallback)
+# - alternative.me Fear & Greed
+# - ForexFactory calendar JSON
+# - RSS feeds (FXStreet/Kitco/CoinDesk/etc.)

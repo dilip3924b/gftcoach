@@ -10,6 +10,14 @@ const schedule = async ({ title, body, trigger, data }) => {
 };
 
 export const notificationEngine = {
+  scheduleBestWindowAlert: async () => {
+    return schedule({
+      title: '⚡ Best trading window starts in 5 min!',
+      body: 'London+NY overlap opens at 6:30 PM IST. Tight spreads. Best signals.',
+      trigger: { weekday: 2, hour: 18, minute: 25, repeats: true },
+      data: { screen: 'today' },
+    });
+  },
   scheduleDailyPlan: async (plan) => {
     return schedule({
       title: `☀️ Your Trading Plan for ${plan?.dateLabel || 'Today'}`,
@@ -27,18 +35,37 @@ export const notificationEngine = {
 
   sendTradeAlert: async (signal) => {
     const high = signal?.confidence === 'HIGH';
+    const symbolLabel = signal?.symbol === 'XAUUSD' ? '🥇 XAU/USD' : signal?.symbol === 'BTCUSD' ? '₿ BTC/USD' : '💶 EUR/USD';
     const id = await Notifications.scheduleNotificationAsync({
       content: {
-        title: high ? `🎯 TRADE SETUP READY — EUR/USD ${signal.signal}` : '👀 Potential EUR/USD setup',
+        title: high ? `🎯 ${symbolLabel} ${signal.signal} setup ready` : `👀 ${symbolLabel} potential setup`,
+        subtitle: high ? `${signal?.confidence || 'MEDIUM'} confidence` : 'Tap to review now',
         body: high
-          ? `Entry: ${signal.entry?.range} | SL ${signal.stopLoss?.pips} pips | TP ${signal.takeProfit?.pips} pips`
+          ? `Entry ${signal.entry?.range || signal.entry?.price || 'N/A'} | SL ${signal.stopLoss?.price || 'N/A'} | TP ${signal.takeProfit?.price || 'N/A'}`
           : `Direction: ${signal.signal}. Open app and review full instructions.`,
-        data: { screen: 'signal', signalId: signal?.id || null },
+        data: { screen: 'signal', signalId: signal?.id || null, symbol: signal?.symbol || 'EURUSD' },
+        categoryIdentifier: 'SIGNAL_ACTIONS',
       },
       trigger: null,
     });
     await notificationEngine.scheduleEntryWindowWarnings(signal);
     return id;
+  },
+
+  sendMultiAssetAlert: async (signal, totalSignals = 1) => {
+    const symbolLabel = signal?.symbol === 'XAUUSD' ? '🥇 XAU/USD' : signal?.symbol === 'BTCUSD' ? '₿ BTC/USD' : '💶 EUR/USD';
+    return Notifications.scheduleNotificationAsync({
+      content: {
+        title: `🎯 ${symbolLabel} ${signal?.signal || 'WAIT'} Signal`,
+        subtitle: `${signal?.confidence || 'LOW'} confidence`,
+        body: totalSignals > 1
+          ? `${totalSignals} setups found. Best: ${symbolLabel}. Confidence: ${signal?.confidence} (${signal?.confidenceScore || 'N/A'}/100).`
+          : `${symbolLabel} setup ready. Confidence: ${signal?.confidence} (${signal?.confidenceScore || 'N/A'}/100).`,
+        data: { screen: 'signal', symbol: signal?.symbol || 'EURUSD', signalId: signal?.id || null },
+        categoryIdentifier: 'SIGNAL_ACTIONS',
+      },
+      trigger: null,
+    });
   },
 
   scheduleDangerWarnings: async (events = []) => {
@@ -106,6 +133,12 @@ export const notificationEngine = {
     return Notifications.scheduleNotificationAsync({ content: m, trigger: null });
   },
 
+  sendMilestoneByProfit: async (totalProfit) => {
+    const key = [100, 75, 50, 25].find((m) => Number(totalProfit) >= m && Number(totalProfit) < m + 5);
+    if (!key) return null;
+    return notificationEngine.sendMilestone(key);
+  },
+
   scheduleExpiryWarnings: async (startDate) => {
     const start = toDate(startDate);
     const checkpoints = [20, 24, 27, 28];
@@ -138,6 +171,15 @@ export const notificationEngine = {
       body: 'Tap to review your week and next plan.',
       trigger: { weekday: 1, hour: 19, minute: 0, repeats: true },
       data: { screen: 'ai' },
+    });
+  },
+
+  scheduleFridayCloseWarning: async () => {
+    return schedule({
+      title: '⚠️ Close your trades - market closing soon',
+      body: 'Market closes for weekend tonight. Close all trades before 10:30 PM IST.',
+      trigger: { weekday: 6, hour: 21, minute: 30, repeats: true },
+      data: { screen: 'today' },
     });
   },
 
@@ -208,6 +250,9 @@ export const notificationEngine = {
       [ENTRY_WINDOW_EXPIRED_KEY, expiredId],
     ]);
   },
+
+  scheduleSignalExpiryWarning: async (signal) => notificationEngine.scheduleEntryWindowWarnings(signal),
+  cancelSignalExpiryWarning: async () => notificationEngine.cancelEntryWindowWarnings(),
 
   cancelEntryWindowWarnings: async () => {
     const [warningId, expiredId] = await AsyncStorage.multiGet([ENTRY_WINDOW_WARNING_KEY, ENTRY_WINDOW_EXPIRED_KEY]);

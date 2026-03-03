@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS trades (
   id          BIGSERIAL PRIMARY KEY,
   user_id     UUID REFERENCES profiles(id) ON DELETE CASCADE NOT NULL,
+  symbol      TEXT DEFAULT 'EURUSD' CHECK (symbol IN ('EURUSD', 'XAUUSD', 'BTCUSD')),
+  asset_class TEXT DEFAULT 'forex' CHECK (asset_class IN ('forex', 'commodity', 'crypto')),
   pair        TEXT NOT NULL DEFAULT 'EUR/USD'
               CHECK (pair IN ('EUR/USD', 'AUD/USD', 'GBP/USD', 'USD/JPY')),
   direction   TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL')),
@@ -116,6 +118,8 @@ CREATE TABLE IF NOT EXISTS sync_queue (
 CREATE TABLE IF NOT EXISTS signals (
   id                 BIGSERIAL PRIMARY KEY,
   user_id            UUID REFERENCES profiles(id) ON DELETE CASCADE,
+  symbol             TEXT DEFAULT 'EURUSD' CHECK (symbol IN ('EURUSD', 'XAUUSD', 'BTCUSD')),
+  asset_class        TEXT DEFAULT 'forex' CHECK (asset_class IN ('forex', 'commodity', 'crypto')),
   pair               TEXT DEFAULT 'EUR/USD',
   direction          TEXT CHECK (direction IN ('BUY', 'SELL', 'WAIT')),
   confidence         TEXT CHECK (confidence IN ('HIGH', 'MEDIUM', 'LOW')),
@@ -126,6 +130,11 @@ CREATE TABLE IF NOT EXISTS signals (
   sl_pips            INTEGER,
   tp_pips            INTEGER,
   technical_score    INTEGER,
+  news_sentiment     TEXT,
+  news_score         DECIMAL(3,2),
+  thinking_report    JSONB,
+  dxy_value          DECIMAL(6,3),
+  fear_greed_index   INTEGER,
   reasons            JSONB,
   warnings           JSONB,
   simple_explanation TEXT,
@@ -145,6 +154,16 @@ ALTER TABLE signals ADD COLUMN IF NOT EXISTS user_opened_at TIMESTAMPTZ;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS user_entry_window TEXT;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS actual_entry_price DECIMAL(10,5);
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS entry_pip_slippage INTEGER;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS symbol TEXT DEFAULT 'EURUSD' CHECK (symbol IN ('EURUSD', 'XAUUSD', 'BTCUSD'));
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS asset_class TEXT DEFAULT 'forex' CHECK (asset_class IN ('forex', 'commodity', 'crypto'));
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS news_sentiment TEXT;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS news_score DECIMAL(3,2);
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS thinking_report JSONB;
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS dxy_value DECIMAL(6,3);
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS fear_greed_index INTEGER;
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS symbol TEXT DEFAULT 'EURUSD' CHECK (symbol IN ('EURUSD', 'XAUUSD', 'BTCUSD'));
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS asset_class TEXT DEFAULT 'forex' CHECK (asset_class IN ('forex', 'commodity', 'crypto'));
 
 -- -----------------------------------------------------
 -- TABLE: active_trade (zero-knowledge engine)
@@ -180,9 +199,16 @@ CREATE TABLE IF NOT EXISTS user_preferences (
   notification_trade  BOOLEAN DEFAULT TRUE,
   notification_danger BOOLEAN DEFAULT TRUE,
   notification_daily  BOOLEAN DEFAULT TRUE,
+  preferred_assets    TEXT[] DEFAULT '{"EURUSD"}',
+  btcusd_enabled      BOOLEAN DEFAULT FALSE,
+  xauusd_enabled      BOOLEAN DEFAULT FALSE,
   created_at          TIMESTAMPTZ DEFAULT NOW(),
   updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
+
+ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS preferred_assets TEXT[] DEFAULT '{"EURUSD"}';
+ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS btcusd_enabled BOOLEAN DEFAULT FALSE;
+ALTER TABLE user_preferences ADD COLUMN IF NOT EXISTS xauusd_enabled BOOLEAN DEFAULT FALSE;
 
 -- -----------------------------------------------------
 -- FUNCTIONS + TRIGGERS
@@ -286,6 +312,7 @@ ALTER TABLE user_preferences ENABLE ROW LEVEL SECURITY;
 -- drop old policies if they already exist
 DROP POLICY IF EXISTS own_profile_select ON profiles;
 DROP POLICY IF EXISTS own_profile_update ON profiles;
+DROP POLICY IF EXISTS own_profile_insert ON profiles;
 DROP POLICY IF EXISTS own_trades_select ON trades;
 DROP POLICY IF EXISTS own_trades_insert ON trades;
 DROP POLICY IF EXISTS own_trades_update ON trades;
@@ -301,6 +328,7 @@ DROP POLICY IF EXISTS own_prefs_all ON user_preferences;
 
 CREATE POLICY own_profile_select ON profiles FOR SELECT USING (auth.uid() = id);
 CREATE POLICY own_profile_update ON profiles FOR UPDATE USING (auth.uid() = id);
+CREATE POLICY own_profile_insert ON profiles FOR INSERT WITH CHECK (auth.uid() = id);
 
 CREATE POLICY own_trades_select ON trades FOR SELECT USING (auth.uid() = user_id);
 CREATE POLICY own_trades_insert ON trades FOR INSERT WITH CHECK (auth.uid() = user_id);

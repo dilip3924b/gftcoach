@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { RefreshControl, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import ActiveTradeBanner from '../components/ActiveTradeBanner';
 import DailyPlanCard from '../components/DailyPlanCard';
@@ -19,12 +19,14 @@ export default function TodayScreen({
   pacing,
   scanStatus,
   onOpenSignal,
+  onOpenAssetSelect,
   onOpenAI,
   onOpenChart,
   onManualScan,
 }) {
   const [session, setSession] = useState(getCurrentTradingSession());
   const [briefing, setBriefing] = useState('Loading briefing...');
+  const [briefSlot, setBriefSlot] = useState('');
   const [price, setPrice] = useState(null);
   const [danger, setDanger] = useState({ isDanger: false });
   const [calendar, setCalendar] = useState([]);
@@ -32,7 +34,30 @@ export default function TodayScreen({
   const market = isMarketOpen();
   const nextOpen = getNextMarketOpen();
 
-  const refresh = async () => {
+  const getIstSlot = () => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    const h = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+    const slot = h >= 18 ? '18' : h >= 13 ? '13' : h >= 9 ? '09' : 'pre';
+    return `${y}-${m}-${d}-${slot}`;
+  };
+
+  const formatFreshness = (timestamp) => {
+    if (!timestamp) return 'unknown';
+    const sec = Math.max(0, Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000));
+    return `${sec}s ago`;
+  };
+
+  const refresh = useCallback(async () => {
     setRefreshing(true);
     const [prices, d, cal, brief] = await Promise.all([
       getLiveForexPrices().catch(() => null),
@@ -45,8 +70,9 @@ export default function TodayScreen({
     setDanger(d);
     setCalendar(cal || []);
     setBriefing(brief?.content || 'Briefing unavailable right now.');
+    setBriefSlot(getIstSlot());
     setRefreshing(false);
-  };
+  }, [userId]);
 
   useEffect(() => {
     refresh();
@@ -55,8 +81,18 @@ export default function TodayScreen({
       setSession(getCurrentTradingSession());
       setPrice(prices?.EURUSD || null);
     }, 30000);
-    return () => clearInterval(priceInt);
-  }, []);
+    const briefingInt = setInterval(async () => {
+      const slotNow = getIstSlot();
+      if (slotNow === briefSlot) return;
+      const brief = await getMorningBriefing(userId).catch(() => ({ content: 'Briefing unavailable right now.' }));
+      setBriefing(brief?.content || 'Briefing unavailable right now.');
+      setBriefSlot(slotNow);
+    }, 60000);
+    return () => {
+      clearInterval(priceInt);
+      clearInterval(briefingInt);
+    };
+  }, [briefSlot, userId, refresh]);
 
   return (
     <ScrollView
@@ -84,7 +120,8 @@ export default function TodayScreen({
       <View style={styles.card}>
         <Text style={styles.cardTitle}>📡 Live Market</Text>
         <Text style={styles.marketLine}>EUR/USD {price?.bid?.toFixed?.(5) || '—'} {price?.changePct ? `${price.changePct}%` : ''}</Text>
-        <Text style={styles.marketSub}>Spread: {price?.spread ?? '—'} pips · Status: {market.isOpen ? scanStatus : 'market_closed'}</Text>
+        <Text style={styles.marketSub}>Spread: {price?.spread ?? '—'} pips · Updated {formatFreshness(price?.updatedAt || price?.timestamp)}</Text>
+        <Text style={styles.marketSub}>Status: {market.isOpen ? scanStatus : 'market_closed'}</Text>
       </View>
 
       <View style={styles.card}>
@@ -104,6 +141,7 @@ export default function TodayScreen({
       <GoalPaceCard pacing={pacing} todayPL={todayPL} totalProfit={totalProfit} />
 
       <View style={styles.actions}>
+        <TouchableOpacity style={styles.actionBtn} onPress={onOpenAssetSelect}><Text style={styles.actionTxt}>🧭 Choose Asset</Text></TouchableOpacity>
         <TouchableOpacity style={styles.actionBtn} onPress={onOpenAI}><Text style={styles.actionTxt}>🤖 Ask AI Coach</Text></TouchableOpacity>
         <TouchableOpacity style={styles.actionBtn} onPress={onOpenChart}><Text style={styles.actionTxt}>📊 Open Chart</Text></TouchableOpacity>
       </View>

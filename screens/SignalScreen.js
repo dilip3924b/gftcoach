@@ -10,11 +10,28 @@ import { db } from '../lib/db';
 
 const alpha = (hex, op) => `${hex}${op}`;
 
-export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) {
+export default function SignalScreen({
+  signal,
+  onPlacedTrade,
+  onBack,
+  onOpenThinking,
+  userId,
+  scanStatus = 'waiting',
+  lastScanAt = null,
+  nextScanAt = null,
+  noSignalReason = '',
+  lastScanResults = [],
+}) {
   const { entryStatus, loading } = useEntryWindow(signal);
   const [question, setQuestion] = React.useState('');
   const [aiReply, setAiReply] = React.useState('');
   const [asking, setAsking] = React.useState(false);
+  const [, setTick] = React.useState(Date.now());
+
+  React.useEffect(() => {
+    const id = setInterval(() => setTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   React.useEffect(() => {
     notificationEngine.cancelEntryWindowWarnings().catch(() => {});
@@ -31,9 +48,31 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
   }, [signal?.id, entryStatus?.window]);
 
   if (!signal) {
+    const nowMs = Date.now();
+    const nextMs = nextScanAt ? new Date(nextScanAt).getTime() : null;
+    const secs = nextMs ? Math.max(0, Math.floor((nextMs - nowMs) / 1000)) : null;
+    const mm = secs != null ? String(Math.floor(secs / 60)).padStart(2, '0') : '--';
+    const ss = secs != null ? String(secs % 60).padStart(2, '0') : '--';
+
     return (
       <View style={[styles.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <Text style={{ color: C.text, fontSize: 16, fontWeight: '800' }}>No active signal yet.</Text>
+        <View style={[styles.card, { width: '92%', borderLeftWidth: 4, borderLeftColor: C.yellow }]}>
+          <Text style={{ color: C.text, fontSize: 16, fontWeight: '800' }}>No active signal yet</Text>
+          <Text style={[styles.txt, { marginTop: 8 }]}>Scanner status: {scanStatus}</Text>
+          <Text style={styles.txt}>Last scan: {lastScanAt ? new Date(lastScanAt).toLocaleTimeString('en-IN') : 'Not scanned yet'}</Text>
+          <Text style={styles.txt}>Next scan in: {mm}:{ss}</Text>
+          <Text style={[styles.txt, { marginTop: 8 }]}>Reason: {noSignalReason || 'Waiting for valid setup (session, spread, danger checks).'}</Text>
+          {Array.isArray(lastScanResults) && lastScanResults.length > 0 && (
+            <View style={{ marginTop: 10 }}>
+              <Text style={[styles.cardTitle, { marginBottom: 4 }]}>Last scan scores</Text>
+              {lastScanResults.slice(0, 3).map((row) => (
+                <Text key={row.symbol} style={styles.txt}>
+                  • {row.symbol}: {row.confidenceScore ?? row.technicalScore ?? 'N/A'}/100 {row.waitReason ? `(${row.waitReason})` : ''}
+                </Text>
+              ))}
+            </View>
+          )}
+        </View>
       </View>
     );
   }
@@ -57,6 +96,7 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
         sl: signal.stopLoss?.price,
         tp: signal.takeProfit?.price,
       };
+  const distanceUnit = signal?.symbol === 'EURUSD' ? 'pips' : 'dollar move';
 
   const runAsk = async (text) => {
     if (!text?.trim()) return;
@@ -70,7 +110,7 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
     <ScrollView style={styles.container} contentContainerStyle={{ paddingBottom: 100 }}>
       <View style={styles.headerRow}>
         <TouchableOpacity onPress={onBack}><Text style={styles.back}>← Back</Text></TouchableOpacity>
-        <Text style={styles.title}>EUR/USD SIGNAL</Text>
+        <Text style={styles.title}>{signal?.symbol || 'EURUSD'} SIGNAL</Text>
       </View>
 
       <View style={[styles.windowCard, { borderColor: windowColor, backgroundColor: alpha(windowColor, '20') }]}>
@@ -89,7 +129,7 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
             </Text>
             {entryStatus?.canStillEnter ? (
               <>
-                <Text style={styles.windowTxt}>Price moved {entryStatus?.pipsFromOriginal || 0} pips. Use updated numbers:</Text>
+                <Text style={styles.windowTxt}>Price moved {entryStatus?.pipsFromOriginal || 0} {distanceUnit}. Use updated numbers:</Text>
                 <Text style={styles.windowNums}>Entry {numbers.entry} · SL {numbers.sl} · TP {numbers.tp}</Text>
                 <Text style={styles.windowNums}>Risk ${entryStatus?.riskIfEnterNow} · Reward ${entryStatus?.rewardIfEnterNow} · R:R 1:{entryStatus?.rrRatio}</Text>
               </>
@@ -104,7 +144,13 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
       <View style={[styles.card, { borderLeftColor: color }]}> 
         <Text style={[styles.signal, { color }]}>{signal.signal} SIGNAL</Text>
         <Text style={styles.valid}>Valid for: {signal.validUntilMinutes || 45} minutes</Text>
+        {!!signal?.demoMode && <Text style={styles.demoWarn}>⚠️ Demo Mode: {signal?.demoNote}</Text>}
         <ConfidenceMeter confidence={signal.confidence || 'LOW'} />
+        {!!(signal?.thinkingReport || signal?.thinking_report) && (
+          <TouchableOpacity style={styles.thinkBtn} onPress={onOpenThinking}>
+            <Text style={styles.thinkTxt}>🤖 How did AI decide?</Text>
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.card}>
@@ -115,8 +161,8 @@ export default function SignalScreen({ signal, onPlacedTrade, onBack, userId }) 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>📊 Signal Details</Text>
         <Text style={styles.txt}>Entry Zone: {entryStatus?.currentEntry?.range || signal.entry?.range}</Text>
-        <Text style={styles.txt}>Stop Loss: {numbers.sl} ({entryStatus?.adjustedSlPips || signal.stopLoss?.pips} pips)</Text>
-        <Text style={styles.txt}>Take Profit: {numbers.tp} ({entryStatus?.adjustedTpPips || signal.takeProfit?.pips} pips)</Text>
+        <Text style={styles.txt}>Stop Loss: {numbers.sl} ({entryStatus?.adjustedSlPips || signal.stopLoss?.pips} {distanceUnit})</Text>
+        <Text style={styles.txt}>Take Profit: {numbers.tp} ({entryStatus?.adjustedTpPips || signal.takeProfit?.pips} {distanceUnit})</Text>
         <Text style={styles.txt}>Lot Size: 0.01</Text>
         <Text style={styles.txt}>Max Loss: ${entryStatus?.riskIfEnterNow || signal.stopLoss?.maxLoss} · Potential Gain: ${entryStatus?.rewardIfEnterNow || signal.takeProfit?.potentialGain}</Text>
       </View>
@@ -185,4 +231,7 @@ const styles = StyleSheet.create({
   askBtn: { backgroundColor: C.blue, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10 },
   askBtnTxt: { color: '#fff', fontWeight: '800', fontSize: 12 },
   aiReply: { color: C.text, marginTop: 10, lineHeight: 19, fontSize: 12 },
+  thinkBtn: { marginTop: 10, alignSelf: 'flex-start', borderWidth: 1, borderColor: C.blue, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 7 },
+  thinkTxt: { color: C.blue, fontWeight: '800', fontSize: 12 },
+  demoWarn: { color: C.orange, fontWeight: '700', marginTop: 6, fontSize: 12 },
 });

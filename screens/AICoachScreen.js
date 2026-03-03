@@ -1,4 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as Sharing from 'expo-sharing';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
@@ -16,6 +18,7 @@ import AITypingIndicator from '../components/AITypingIndicator';
 import { C } from '../lib/constants';
 import {
   chatWithCoach,
+  getAssetSignal,
   getMorningBriefing,
   getTradeSignal,
   getWeeklyReview,
@@ -49,6 +52,12 @@ const toMessage = (role, content) => ({
   timeLabel: timeLabel(),
 });
 
+const makeExportFilename = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `ai_coach_export_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.txt`;
+};
+
 export default function AICoachScreen({ userId }) {
   const scrollRef = useRef(null);
   const [messages, setMessages] = useState([]);
@@ -78,17 +87,25 @@ export default function AICoachScreen({ userId }) {
 
   const runAI = async (runner, label) => {
     setLoading(true);
-    const pending = [...messages, toMessage('assistant', `Analyzing ${label}...`)];
-    await persistMessages(pending);
-    const result = await runner();
-    const cleaned = pending.slice(0, -1);
-    await persistMessages([
-      ...cleaned,
-      toMessage('assistant', result?.content || 'No response. Please retry.'),
-    ]);
-    setLoading(false);
-    const dayUsage = await rateLimitManager.getDailyUsage();
-    setUsage(dayUsage);
+    try {
+      const pending = [...messages, toMessage('assistant', `Analyzing ${label}...`)];
+      await persistMessages(pending);
+      const result = await runner();
+      const cleaned = pending.slice(0, -1);
+      await persistMessages([
+        ...cleaned,
+        toMessage('assistant', result?.content || 'No response. Please retry.'),
+      ]);
+    } catch {
+      await persistMessages([
+        ...messages,
+        toMessage('assistant', 'Could not fetch signal right now. Please try again in a few seconds.'),
+      ]);
+    } finally {
+      setLoading(false);
+      const dayUsage = await rateLimitManager.getDailyUsage();
+      setUsage(dayUsage);
+    }
   };
 
   const onSend = async () => {
@@ -119,6 +136,46 @@ export default function AICoachScreen({ userId }) {
     Alert.alert('Message', message.content);
   };
 
+  const onExportTxt = async () => {
+    try {
+      if (!messages.length) {
+        Alert.alert('Nothing to export', 'No coach messages yet.');
+        return;
+      }
+
+      const lines = [
+        'GFT Coach - AI Coach Export',
+        `Generated: ${new Date().toISOString()}`,
+        '',
+        ...messages.map((m) => {
+          const role = m.role === 'assistant' ? 'AI' : 'You';
+          const when = m.timeLabel || new Date(m.createdAt || Date.now()).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+          return `[${when}] ${role}: ${m.content}`;
+        }),
+        '',
+      ];
+
+      const fileUri = `${FileSystem.documentDirectory}${makeExportFilename()}`;
+      await FileSystem.writeAsStringAsync(fileUri, lines.join('\n\n'), {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(fileUri, {
+          mimeType: 'text/plain',
+          dialogTitle: 'Export Coach Chat',
+          UTI: 'public.plain-text',
+        });
+        return;
+      }
+
+      Alert.alert('Exported', `Saved as TXT:\n${fileUri}`);
+    } catch (error) {
+      Alert.alert('Export failed', error?.message || 'Could not export chat.');
+    }
+  };
+
   return (
     <KeyboardAvoidingView
       style={styles.container}
@@ -127,6 +184,9 @@ export default function AICoachScreen({ userId }) {
       <View style={styles.header}>
         <Text style={styles.headerTitle}>🤖 AI Coach</Text>
         <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.headerBtn} onPress={onExportTxt}>
+            <Text style={styles.headerBtnTxt}>Export TXT</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.headerBtn} onPress={onClear}>
             <Text style={styles.headerBtnTxt}>Clear</Text>
           </TouchableOpacity>
@@ -166,6 +226,20 @@ export default function AICoachScreen({ userId }) {
           onPress={() => runAI(() => getTradeSignal(userId), 'trade signal')}
         >
           <Text style={styles.quickTxt}>📊 Signal</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.quickBtn}
+          disabled={loading}
+          onPress={() => runAI(() => getAssetSignal(userId, 'EURUSD'), 'EUR/USD signal')}
+        >
+          <Text style={styles.quickTxt}>💶 EUR</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.quickBtn}
+          disabled={loading}
+          onPress={() => runAI(() => getAssetSignal(userId, 'XAUUSD'), 'XAU/USD signal')}
+        >
+          <Text style={styles.quickTxt}>🥇 XAU</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={styles.quickBtn}
@@ -227,9 +301,9 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { color: C.text, fontSize: 14, fontWeight: '700' },
   emptySub: { color: C.muted, fontSize: 12, marginTop: 4 },
-  quickRow: { flexDirection: 'row', gap: 8, paddingHorizontal: 12, paddingBottom: 8 },
+  quickRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, paddingHorizontal: 12, paddingBottom: 8 },
   quickBtn: {
-    flex: 1,
+    minWidth: '23%',
     backgroundColor: C.card2,
     borderRadius: 10,
     borderWidth: 1,

@@ -128,7 +128,7 @@ export const getWeekSchedule = () => {
     { day: 2, label: 'Tue', windows: '1:30 PM - 10:30 PM', quality: 'best' },
     { day: 3, label: 'Wed', windows: '1:30 PM - 10:30 PM', quality: 'best' },
     { day: 4, label: 'Thu', windows: '1:30 PM - 10:30 PM', quality: 'best' },
-    { day: 5, label: 'Fri', windows: '1:30 PM - 6:30 PM', quality: 'caution' },
+    { day: 5, label: 'Fri', windows: '1:30 PM - 10:30 PM', quality: 'caution' },
     { day: 6, label: 'Sat', windows: 'Closed', quality: 'closed' },
     { day: 0, label: 'Sun', windows: 'Closed', quality: 'closed' },
   ];
